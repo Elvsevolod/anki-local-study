@@ -1,6 +1,7 @@
 # Anki Local Study
 
 Local Anki-style web app for importing `.apkg` decks and studying cards in the browser.
+<img alt="image" src="https://github.com/user-attachments/assets/10c24a75-9b0f-4176-be51-e3dd24762585" />
 
 ## Online Version
 
