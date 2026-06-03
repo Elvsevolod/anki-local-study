@@ -2,6 +2,14 @@
 
 Local Anki-style web app for importing `.apkg` decks and studying cards in the browser.
 
+## Online Version
+
+Open the GitHub Pages version:
+
+```text
+https://elvsevolod.github.io/anki-local-study/
+```
+
 ## Run Locally
 
 1. Clone the repository:
