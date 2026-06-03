@@ -4,6 +4,7 @@ const PROGRESS_KEY = "anki-local-progress-v1";
 
 const els = {
   pickFileBtn: document.getElementById("pickFileBtn"),
+  resetAllBtn: document.getElementById("resetAllBtn"),
   fileInput: document.getElementById("fileInput"),
   collectionName: document.getElementById("collectionName"),
   collectionMeta: document.getElementById("collectionMeta"),
@@ -48,6 +49,7 @@ let sqlReady;
 let toastTimer;
 
 els.pickFileBtn.addEventListener("click", () => els.fileInput.click());
+els.resetAllBtn.addEventListener("click", resetAll);
 els.fileInput.addEventListener("change", handleFileSelect);
 els.showAnswerBtn.addEventListener("click", showAnswer);
 els.shuffleBtn.addEventListener("click", shuffleQueue);
@@ -71,7 +73,9 @@ async function handleFileSelect(event) {
 
   setLoading(true, "Импортирую...");
   try {
-    state.collection = await importApkg(file);
+    const nextCollection = await importApkg(file);
+    revokeMediaUrls(state.collection);
+    state.collection = nextCollection;
     state.activeDeckId = "all";
     state.studiedToday = getTodayCount();
     buildQueue();
@@ -408,6 +412,31 @@ function render() {
   renderStats();
   renderStudy();
   refreshIcons();
+}
+
+function resetAll() {
+  const confirmed = window.confirm(
+    "Сбросить прогресс, выгрузить текущую колоду и начать заново?",
+  );
+  if (!confirmed) return;
+
+  revokeMediaUrls(state.collection);
+  localStorage.removeItem(PROGRESS_KEY);
+  state.collection = null;
+  state.activeDeckId = "all";
+  state.queue = [];
+  state.queueOriginalLength = 0;
+  state.currentIndex = 0;
+  state.answerVisible = false;
+  state.progress = { cards: {}, days: {} };
+  state.studiedToday = 0;
+  els.fileInput.value = "";
+  showToast("Кеш и прогресс сброшены");
+  render();
+}
+
+function revokeMediaUrls(collection) {
+  collection?.mediaUrls?.forEach((url) => URL.revokeObjectURL(url));
 }
 
 function renderCollection() {
