@@ -6,6 +6,7 @@ const els = {
   pickFileBtn: document.getElementById("pickFileBtn"),
   resetAllBtn: document.getElementById("resetAllBtn"),
   fileInput: document.getElementById("fileInput"),
+  pasteBtn: document.getElementById("pasteBtn"),
   collectionName: document.getElementById("collectionName"),
   collectionMeta: document.getElementById("collectionMeta"),
   deckList: document.getElementById("deckList"),
@@ -30,6 +31,7 @@ const els = {
   cardDeck: document.getElementById("cardDeck"),
   cardTags: document.getElementById("cardTags"),
   toast: document.getElementById("toast"),
+  dropOverlay: document.getElementById("dropOverlay"),
 };
 
 const initialProgress = loadProgress();
@@ -64,13 +66,64 @@ els.ratingRow.addEventListener("click", (event) => {
   rateCurrent(button.dataset.rating);
 });
 
+els.pasteBtn.addEventListener("click", pasteFromClipboard);
+
+document.addEventListener("paste", (event) => {
+  const file = getFileFromPasteEvent(event);
+  if (file) {
+    event.preventDefault();
+    importFile(file);
+  }
+});
+
+let dragCounter = 0;
+
+document.addEventListener("dragenter", (event) => {
+  event.preventDefault();
+  dragCounter++;
+  if (dragCounter === 1) {
+    els.dropOverlay.classList.remove("hidden");
+    refreshIcons();
+  }
+});
+
+document.addEventListener("dragleave", (event) => {
+  event.preventDefault();
+  dragCounter--;
+  if (dragCounter <= 0) {
+    dragCounter = 0;
+    els.dropOverlay.classList.add("hidden");
+  }
+});
+
+document.addEventListener("dragover", (event) => {
+  event.preventDefault();
+});
+
+document.addEventListener("drop", (event) => {
+  event.preventDefault();
+  dragCounter = 0;
+  els.dropOverlay.classList.add("hidden");
+
+  const file = getFileFromDropEvent(event);
+  if (file) {
+    importFile(file);
+  }
+});
+
+fixIosFileAccept();
+
 render();
 refreshIcons();
 
 async function handleFileSelect(event) {
   const file = event.target.files?.[0];
   if (!file) return;
+  await importFile(file);
+  els.fileInput.value = "";
+}
 
+async function importFile(file) {
   setLoading(true, "Импортирую...");
   try {
     const nextCollection = await importApkg(file);
@@ -88,7 +141,6 @@ async function handleFileSelect(event) {
     showToast(error.message || "Не удалось прочитать пакет Anki");
   } finally {
     setLoading(false);
-    els.fileInput.value = "";
   }
 }
 
@@ -832,4 +884,49 @@ function pluralRu(count, forms) {
   if (last === 1) return `${count} ${forms[0]}`;
   if (last >= 2 && last <= 4) return `${count} ${forms[1]}`;
   return `${count} ${forms[2]}`;
+}
+
+async function pasteFromClipboard() {
+  try {
+    const items = await navigator.clipboard.read();
+    for (const item of items) {
+      for (const type of item.types) {
+        if (type === "application/zip" || type === "application/octet-stream" || type === "" || type.startsWith("image/")) {
+          const blob = await item.getType(type);
+          const file = new File([blob], "clipboard.apkg", { type: blob.type });
+          await importFile(file);
+          return;
+        }
+      }
+    }
+    showToast("В буфере обмена нет файла .apkg");
+  } catch {
+    showToast("Не удалось прочитать буфер. Попробуйте Ctrl+V или выберите файл.");
+  }
+}
+
+function getFileFromPasteEvent(event) {
+  const items = event.clipboardData?.items;
+  if (!items) return null;
+  for (const item of items) {
+    if (item.kind === "file") {
+      return item.getAsFile();
+    }
+  }
+  return null;
+}
+
+function getFileFromDropEvent(event) {
+  const files = event.dataTransfer?.files;
+  if (!files || !files.length) return null;
+  return files[0];
+}
+
+function fixIosFileAccept() {
+  const isIOS =
+    /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+    (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  if (isIOS) {
+    els.fileInput.removeAttribute("accept");
+  }
 }
