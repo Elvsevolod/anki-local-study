@@ -1,9 +1,9 @@
 const CDN_SQL_WASM = "https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.3/";
 const FIELD_SEP = "\u001f";
-const PROGRESS_KEY = "anki-local-progress-v1";
+const PROGRESS_KEY = "anki-local-progress-v2";
 const COLLECTION_DB = "anki-local-store";
 const COLLECTION_STORE = "collections";
-const COLLECTION_META = "current";
+const COLLECTION_INDEX_KEY = "_index";
 
 function openCollectionDb() {
   return new Promise((resolve, reject) => {
@@ -16,26 +16,57 @@ function openCollectionDb() {
   });
 }
 
-async function storeCollectionFile(file) {
+async function loadFilesIndex() {
+  try {
+    const db = await openCollectionDb();
+    const tx = db.transaction(COLLECTION_STORE, "readonly");
+    const req = tx.objectStore(COLLECTION_STORE).get(COLLECTION_INDEX_KEY);
+    const raw = await new Promise((resolve, reject) => {
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = reject;
+    });
+    db.close();
+    return raw || { files: [], activeId: null };
+  } catch {
+    return { files: [], activeId: null };
+  }
+}
+
+async function saveFilesIndex(index) {
   try {
     const db = await openCollectionDb();
     const tx = db.transaction(COLLECTION_STORE, "readwrite");
-    tx.objectStore(COLLECTION_STORE).put(file, COLLECTION_META);
+    tx.objectStore(COLLECTION_STORE).put(index, COLLECTION_INDEX_KEY);
     await new Promise((resolve, reject) => {
       tx.oncomplete = resolve;
       tx.onerror = reject;
     });
     db.close();
   } catch (err) {
-    console.warn("Не удалось сохранить коллекцию в IndexedDB:", err);
+    console.warn("Не удалось сохранить индекс:", err);
   }
 }
 
-async function loadStoredCollection() {
+async function storeCollectionFile(file, fileId) {
+  try {
+    const db = await openCollectionDb();
+    const tx = db.transaction(COLLECTION_STORE, "readwrite");
+    tx.objectStore(COLLECTION_STORE).put(file, fileId);
+    await new Promise((resolve, reject) => {
+      tx.oncomplete = resolve;
+      tx.onerror = reject;
+    });
+    db.close();
+  } catch (err) {
+    console.warn("Не удалось сохранить файл в IndexedDB:", err);
+  }
+}
+
+async function loadCollectionFile(fileId) {
   try {
     const db = await openCollectionDb();
     const tx = db.transaction(COLLECTION_STORE, "readonly");
-    const req = tx.objectStore(COLLECTION_STORE).get(COLLECTION_META);
+    const req = tx.objectStore(COLLECTION_STORE).get(fileId);
     const file = await new Promise((resolve, reject) => {
       req.onsuccess = () => resolve(req.result);
       req.onerror = reject;
@@ -47,15 +78,18 @@ async function loadStoredCollection() {
   }
 }
 
-async function clearStoredCollection() {
+async function deleteCollectionFile(fileId) {
   try {
     const db = await openCollectionDb();
     const tx = db.transaction(COLLECTION_STORE, "readwrite");
-    tx.objectStore(COLLECTION_STORE).delete(COLLECTION_META);
-    await new Promise((resolve) => { tx.oncomplete = resolve; });
+    tx.objectStore(COLLECTION_STORE).delete(fileId);
+    await new Promise((resolve, reject) => {
+      tx.oncomplete = resolve;
+      tx.onerror = reject;
+    });
     db.close();
   } catch (err) {
-    console.warn("Не удалось очистить IndexedDB:", err);
+    console.warn("Не удалось удалить файл из IndexedDB:", err);
   }
 }
 
@@ -89,19 +123,27 @@ const els = {
   cardTags: document.getElementById("cardTags"),
   toast: document.getElementById("toast"),
   dropOverlay: document.getElementById("dropOverlay"),
+  filesList: document.getElementById("filesList"),
+  filesSection: document.getElementById("filesSection"),
+  sidebar: document.getElementById("sidebar"),
+  sidebarToggle: document.getElementById("sidebarToggle"),
+  sidebarClose: document.getElementById("sidebarClose"),
+  sidebarOverlay: document.getElementById("sidebarOverlay"),
 };
 
 const initialProgress = loadProgress();
 
 const state = {
   collection: null,
+  activeFileId: null,
   activeDeckId: "all",
   queue: [],
   queueOriginalLength: 0,
   currentIndex: 0,
   answerVisible: false,
   progress: initialProgress,
-  studiedToday: initialProgress.days[todayKey()] || 0,
+  filesIndex: { files: [], activeId: null },
+  studiedToday: 0,
 };
 
 let sqlReady;
@@ -168,15 +210,62 @@ document.addEventListener("drop", (event) => {
   }
 });
 
+/* --- Sidebar toggle --- */
+
+function openSidebar() {
+  els.sidebar.classList.add("open");
+  els.sidebarOverlay.classList.remove("hidden");
+  refreshIcons();
+}
+
+function closeSidebar() {
+  els.sidebar.classList.remove("open");
+  els.sidebarOverlay.classList.add("hidden");
+}
+
+function toggleSidebar() {
+  if (els.sidebar.classList.contains("open")) {
+    closeSidebar();
+  } else {
+    openSidebar();
+  }
+}
+
+els.sidebarToggle.addEventListener("click", toggleSidebar);
+els.sidebarClose.addEventListener("click", closeSidebar);
+els.sidebarOverlay.addEventListener("click", closeSidebar);
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && els.sidebar.classList.contains("open")) {
+    closeSidebar();
+  }
+});
+
+function maybeCloseSidebar() {
+  const isMobile = window.matchMedia("(max-width: 980px)").matches;
+  if (isMobile) closeSidebar();
+}
+
 fixIosFileAccept();
 
 (async function init() {
-  const stored = await loadStoredCollection();
-  if (stored) {
-    try {
-      await importFile(stored, { silent: true });
-    } catch (err) {
-      console.warn("Не удалось восстановить коллекцию:", err);
+  const index = await loadFilesIndex();
+  state.filesIndex = index;
+
+  const activeId = index.activeId;
+  if (activeId) {
+    const file = await loadCollectionFile(activeId);
+    if (file) {
+      try {
+        await importFile(file, { silent: true, skipStore: true, fileId: activeId });
+      } catch (err) {
+        console.warn("Не удалось восстановить коллекцию:", err);
+      }
+    } else {
+      index.activeId = null;
+      index.files = index.files.filter((f) => f.id !== activeId);
+      saveFilesIndex(index);
+      state.filesIndex = index;
     }
   }
   render();
@@ -190,21 +279,42 @@ async function handleFileSelect(event) {
   els.fileInput.value = "";
 }
 
-async function importFile(file, { silent = false } = {}) {
+async function importFile(file, { silent = false, skipStore = false, fileId = null } = {}) {
   if (!silent) setLoading(true, "Импортирую...");
   try {
     const nextCollection = await importApkg(file);
     revokeMediaUrls(state.collection);
     state.collection = nextCollection;
     state.activeDeckId = "all";
+
+    const id = fileId || `file_${Date.now()}`;
+    state.activeFileId = id;
+
+    if (!skipStore) {
+      await storeCollectionFile(file, id);
+
+      const name = file.name.replace(/\.apkg$/i, "") || "Колода";
+      const index = state.filesIndex;
+      const existing = index.files.find((f) => f.id === id);
+      if (existing) {
+        existing.name = name;
+        existing.cardCount = nextCollection.cards.length;
+        existing.openedAt = Date.now();
+      } else {
+        index.files.push({ id, name, cardCount: nextCollection.cards.length, openedAt: Date.now() });
+      }
+      index.activeId = id;
+      saveFilesIndex(index);
+    }
+
     state.studiedToday = getTodayCount();
     buildQueue();
-    storeCollectionFile(file);
     if (!silent) {
       showToast(
         `Загружено: ${pluralRu(state.collection.cards.length, ["карточка", "карточки", "карточек"])}`,
       );
     }
+    maybeCloseSidebar();
     render();
   } catch (error) {
     console.error(error);
@@ -528,8 +638,124 @@ function buildQueue(options = {}) {
   state.answerVisible = false;
 }
 
+async function switchToFile(fileId) {
+  if (fileId === state.activeFileId && state.collection) return;
+  saveProgress();
+
+  revokeMediaUrls(state.collection);
+  state.collection = null;
+  state.queue = [];
+  state.queueOriginalLength = 0;
+  state.currentIndex = 0;
+  state.answerVisible = false;
+  state.activeFileId = null;
+
+  const file = await loadCollectionFile(fileId);
+  if (!file) {
+    removeFileFromIndex(fileId);
+    render();
+    return;
+  }
+
+  try {
+    state.filesIndex.activeId = fileId;
+    saveFilesIndex(state.filesIndex);
+    await importFile(file, { silent: true, skipStore: true, fileId });
+  } catch (err) {
+    console.warn("Не удалось переключиться на файл:", err);
+    removeFileFromIndex(fileId);
+  }
+}
+
+async function removeFileFromUI(fileId, event) {
+  event.stopPropagation();
+  const confirmed = window.confirm(
+    "Удалить файл и его прогресс из списка?"
+  );
+  if (!confirmed) return;
+
+  removeFileFromIndex(fileId);
+}
+
+async function removeFileFromIndex(fileId) {
+  await deleteCollectionFile(fileId);
+  const index = state.filesIndex;
+  index.files = index.files.filter((f) => f.id !== fileId);
+
+  if (index.activeId === fileId) {
+    revokeMediaUrls(state.collection);
+    state.collection = null;
+    state.activeFileId = null;
+    state.queue = [];
+    state.queueOriginalLength = 0;
+    state.currentIndex = 0;
+    state.answerVisible = false;
+
+    // Remove progress for this file
+    const progress = state.progress;
+    delete progress.byFile[fileId];
+    saveProgress();
+
+    // Switch to another file if available
+    const next = index.files[index.files.length - 1];
+    if (next) {
+      index.activeId = next.id;
+      saveFilesIndex(index);
+      state.filesIndex = index;
+      const file = await loadCollectionFile(next.id);
+      if (file) {
+        try {
+          await importFile(file, { silent: true, skipStore: true, fileId: next.id });
+        } catch (err) {
+          console.warn("Не удалось переключиться:", err);
+        }
+      }
+      return;
+    }
+    index.activeId = null;
+  }
+
+  saveFilesIndex(index);
+  state.studiedToday = getTodayCount();
+  render();
+}
+
+function renderFilesList() {
+  els.filesList.innerHTML = "";
+  const files = state.filesIndex.files || [];
+
+  if (files.length <= 1) {
+    els.filesSection.classList.add("hidden");
+    return;
+  }
+
+  els.filesSection.classList.remove("hidden");
+
+  files
+    .sort((a, b) => b.openedAt - a.openedAt)
+    .forEach((file) => {
+      const item = document.createElement("div");
+      item.className = `file-item ${file.id === state.activeFileId ? "active" : ""}`;
+      item.innerHTML = `
+        <span class="file-item-name">${escapeHtml(file.name)}</span>
+        <span class="file-item-count">${file.cardCount || 0}</span>
+        <button class="file-item-remove" type="button" title="Удалить">
+          <i data-lucide="x"></i>
+        </button>
+      `;
+
+      item.addEventListener("click", () => switchToFile(file.id));
+      item
+        .querySelector(".file-item-remove")
+        .addEventListener("click", (e) => removeFileFromUI(file.id, e));
+
+      els.filesList.append(item);
+    });
+}
+
 function render() {
   renderCollection();
+  renderFilesList();
   renderDecks();
   renderStats();
   renderStudy();
@@ -537,24 +763,23 @@ function render() {
 }
 
 function resetAll() {
+  const fileId = state.activeFileId;
+  if (!fileId || !state.collection) {
+    showToast("Нет загруженной колоды");
+    return;
+  }
+
   const confirmed = window.confirm(
-    "Сбросить прогресс, выгрузить текущую колоду и начать заново?",
+    "Сбросить прогресс текущей колоды и начать заново?",
   );
   if (!confirmed) return;
 
-  revokeMediaUrls(state.collection);
-  localStorage.removeItem(PROGRESS_KEY);
-  clearStoredCollection();
-  state.collection = null;
-  state.activeDeckId = "all";
-  state.queue = [];
-  state.queueOriginalLength = 0;
-  state.currentIndex = 0;
-  state.answerVisible = false;
-  state.progress = { cards: {}, days: {} };
+  // Reset progress for this file only
+  state.progress.byFile[fileId] = { cards: {}, days: {} };
+  saveProgress();
   state.studiedToday = 0;
-  els.fileInput.value = "";
-  showToast("Кеш и прогресс сброшены");
+  buildQueue({ includeAll: true });
+  showToast("Прогресс сброшен");
   render();
 }
 
@@ -614,6 +839,7 @@ function renderDecks() {
     button.addEventListener("click", () => {
       state.activeDeckId = deck.id;
       buildQueue();
+      maybeCloseSidebar();
       render();
     });
     els.deckList.append(button);
@@ -770,7 +996,8 @@ function rateCurrent(rating) {
   const baseInterval = previous?.intervalDays || Math.max(0, card.interval);
   const next = scheduleForRating(rating, baseInterval, previous);
 
-  state.progress.cards[String(card.id)] = {
+  const fp = getFileProgress();
+  fp.cards[String(card.id)] = {
     dueAt: next.dueAt,
     intervalDays: next.intervalDays,
     reps: (previous?.reps || card.reps || 0) + 1,
@@ -838,19 +1065,26 @@ function getActiveDeckName() {
   return cleanDeckName(state.collection.decks[state.activeDeckId]?.name || "Колода");
 }
 
+function getFileProgress() {
+  if (!state.activeFileId) return { cards: {}, days: {} };
+  if (!state.progress.byFile[state.activeFileId]) {
+    state.progress.byFile[state.activeFileId] = { cards: {}, days: {} };
+  }
+  return state.progress.byFile[state.activeFileId];
+}
+
 function getCardProgress(cardId) {
-  return state.progress.cards[String(cardId)];
+  return getFileProgress().cards[String(cardId)];
 }
 
 function loadProgress() {
   try {
     const parsed = JSON.parse(localStorage.getItem(PROGRESS_KEY) || "{}");
     return {
-      cards: parsed.cards || {},
-      days: parsed.days || {},
+      byFile: parsed.byFile || {},
     };
   } catch {
-    return { cards: {}, days: {} };
+    return { byFile: {} };
   }
 }
 
@@ -863,13 +1097,14 @@ function todayKey() {
 }
 
 function getTodayCount() {
-  return state.progress.days[todayKey()] || 0;
+  return getFileProgress().days[todayKey()] || 0;
 }
 
 function bumpTodayCount() {
   const key = todayKey();
-  state.progress.days[key] = (state.progress.days[key] || 0) + 1;
-  state.studiedToday = state.progress.days[key];
+  const fp = getFileProgress();
+  fp.days[key] = (fp.days[key] || 0) + 1;
+  state.studiedToday = fp.days[key];
 }
 
 function clearCardDetails() {

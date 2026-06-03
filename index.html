@@ -12,7 +12,10 @@
   </head>
   <body>
     <div class="app-shell">
-      <aside class="sidebar">
+      <aside class="sidebar" id="sidebar">
+        <button class="sidebar-close" id="sidebarClose" type="button" aria-label="Закрыть меню">
+          <i data-lucide="x"></i>
+        </button>
         <div class="brand">
           <div class="brand-mark" aria-hidden="true">
             <span></span>
@@ -41,9 +44,14 @@
           <small id="collectionMeta">Выберите пакет Anki</small>
         </div>
 
+        <div class="files-section hidden" id="filesSection">
+          <span class="files-label">Файлы</span>
+          <div class="files-list" id="filesList"></div>
+        </div>
+
         <button class="danger-btn" id="resetAllBtn" type="button">
-          <i data-lucide="trash-2"></i>
-          <span>Сбросить всё</span>
+          <i data-lucide="rotate-ccw"></i>
+          <span>Сбросить прогресс</span>
         </button>
 
         <nav class="deck-list" id="deckList" aria-label="Колоды"></nav>
@@ -51,6 +59,9 @@
 
       <main class="workspace">
         <header class="topbar">
+          <button class="sidebar-toggle" id="sidebarToggle" type="button" aria-label="Меню">
+            <i data-lucide="menu"></i>
+          </button>
           <div>
             <p class="eyebrow" id="activeDeckLabel">Все колоды</p>
             <h1 id="screenTitle">Учебная сессия</h1>
@@ -150,6 +161,8 @@
         </section>
       </main>
     </div>
+
+    <div class="sidebar-overlay hidden" id="sidebarOverlay"></div>
 
     <div class="toast hidden" id="toast"></div>
 
