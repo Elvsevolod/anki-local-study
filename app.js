@@ -1,6 +1,63 @@
 const CDN_SQL_WASM = "https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.3/";
 const FIELD_SEP = "\u001f";
 const PROGRESS_KEY = "anki-local-progress-v1";
+const COLLECTION_DB = "anki-local-store";
+const COLLECTION_STORE = "collections";
+const COLLECTION_META = "current";
+
+function openCollectionDb() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(COLLECTION_DB, 1);
+    req.onupgradeneeded = () => {
+      req.result.createObjectStore(COLLECTION_STORE);
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function storeCollectionFile(file) {
+  try {
+    const db = await openCollectionDb();
+    const tx = db.transaction(COLLECTION_STORE, "readwrite");
+    tx.objectStore(COLLECTION_STORE).put(file, COLLECTION_META);
+    await new Promise((resolve, reject) => {
+      tx.oncomplete = resolve;
+      tx.onerror = reject;
+    });
+    db.close();
+  } catch (err) {
+    console.warn("Не удалось сохранить коллекцию в IndexedDB:", err);
+  }
+}
+
+async function loadStoredCollection() {
+  try {
+    const db = await openCollectionDb();
+    const tx = db.transaction(COLLECTION_STORE, "readonly");
+    const req = tx.objectStore(COLLECTION_STORE).get(COLLECTION_META);
+    const file = await new Promise((resolve, reject) => {
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = reject;
+    });
+    db.close();
+    return file || null;
+  } catch {
+    return null;
+  }
+}
+
+async function clearStoredCollection() {
+  try {
+    const db = await openCollectionDb();
+    const tx = db.transaction(COLLECTION_STORE, "readwrite");
+    tx.objectStore(COLLECTION_STORE).delete(COLLECTION_META);
+    await new Promise((resolve) => { tx.oncomplete = resolve; });
+    db.close();
+  } catch (err) {
+    console.warn("Не удалось очистить IndexedDB:", err);
+  }
+}
 
 const els = {
   pickFileBtn: document.getElementById("pickFileBtn"),
@@ -113,8 +170,18 @@ document.addEventListener("drop", (event) => {
 
 fixIosFileAccept();
 
-render();
-refreshIcons();
+(async function init() {
+  const stored = await loadStoredCollection();
+  if (stored) {
+    try {
+      await importFile(stored, { silent: true });
+    } catch (err) {
+      console.warn("Не удалось восстановить коллекцию:", err);
+    }
+  }
+  render();
+  refreshIcons();
+})();
 
 async function handleFileSelect(event) {
   const file = event.target.files?.[0];
@@ -123,8 +190,8 @@ async function handleFileSelect(event) {
   els.fileInput.value = "";
 }
 
-async function importFile(file) {
-  setLoading(true, "Импортирую...");
+async function importFile(file, { silent = false } = {}) {
+  if (!silent) setLoading(true, "Импортирую...");
   try {
     const nextCollection = await importApkg(file);
     revokeMediaUrls(state.collection);
@@ -132,15 +199,18 @@ async function importFile(file) {
     state.activeDeckId = "all";
     state.studiedToday = getTodayCount();
     buildQueue();
-    showToast(
-      `Загружено: ${pluralRu(state.collection.cards.length, ["карточка", "карточки", "карточек"])}`,
-    );
+    storeCollectionFile(file);
+    if (!silent) {
+      showToast(
+        `Загружено: ${pluralRu(state.collection.cards.length, ["карточка", "карточки", "карточек"])}`,
+      );
+    }
     render();
   } catch (error) {
     console.error(error);
-    showToast(error.message || "Не удалось прочитать пакет Anki");
+    if (!silent) showToast(error.message || "Не удалось прочитать пакет Anki");
   } finally {
-    setLoading(false);
+    if (!silent) setLoading(false);
   }
 }
 
@@ -474,6 +544,7 @@ function resetAll() {
 
   revokeMediaUrls(state.collection);
   localStorage.removeItem(PROGRESS_KEY);
+  clearStoredCollection();
   state.collection = null;
   state.activeDeckId = "all";
   state.queue = [];
