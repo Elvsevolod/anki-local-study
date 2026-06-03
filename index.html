@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Anki Local Study</title>
+    <link
+      rel="icon"
+      href='data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"%3E%3Crect width="46" height="34" x="9" y="15" rx="8" fill="%233f9872"/%3E%3Crect width="34" height="24" x="15" y="20" rx="5" fill="%23f8cf65" opacity=".85"/%3E%3C/svg%3E'
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">
+            <span></span>
+            <span></span>
+            <span></span>
+          </div>
+          <div>
+            <strong>Anki Local</strong>
+            <small>карточки без сервера</small>
+          </div>
+        </div>
+
+        <button class="primary-btn" id="pickFileBtn" type="button">
+          <i data-lucide="upload"></i>
+          <span>Загрузить .apkg</span>
+        </button>
+        <input id="fileInput" type="file" accept=".apkg,application/zip" hidden />
+
+        <div class="collection-card" id="collectionCard">
+          <span class="muted">Коллекция</span>
+          <strong id="collectionName">Файл не загружен</strong>
+          <small id="collectionMeta">Выберите пакет Anki</small>
+        </div>
+
+        <nav class="deck-list" id="deckList" aria-label="Колоды"></nav>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow" id="activeDeckLabel">Все колоды</p>
+            <h1 id="screenTitle">Учебная сессия</h1>
+          </div>
+          <div class="stats-strip" aria-label="Статистика">
+            <div>
+              <span id="dueCount">0</span>
+              <small>к повтору</small>
+            </div>
+            <div>
+              <span id="newCount">0</span>
+              <small>новых</small>
+            </div>
+            <div>
+              <span id="doneCount">0</span>
+              <small>сегодня</small>
+            </div>
+          </div>
+        </header>
+
+        <section class="study-layout">
+          <section class="study-panel" aria-live="polite">
+            <div class="empty-state" id="emptyState">
+              <div class="empty-art" aria-hidden="true">
+                <div class="paper paper-a"></div>
+                <div class="paper paper-b"></div>
+                <div class="paper paper-c"></div>
+              </div>
+              <h2>Загрузите `.apkg`</h2>
+              <p>После импорта здесь появятся карточки выбранной колоды.</p>
+            </div>
+
+            <article class="flashcard hidden" id="flashcard">
+              <div class="card-toolbar">
+                <span id="cardPosition">0 / 0</span>
+                <button class="icon-btn" id="shuffleBtn" type="button" title="Перемешать">
+                  <i data-lucide="shuffle"></i>
+                </button>
+              </div>
+              <div class="card-face" id="questionFace"></div>
+              <div class="answer-face hidden" id="answerFace"></div>
+              <div class="study-actions">
+                <button class="secondary-btn" id="showAnswerBtn" type="button">
+                  <i data-lucide="eye"></i>
+                  <span>Показать ответ</span>
+                </button>
+                <div class="rating-row hidden" id="ratingRow">
+                  <button class="rating again" data-rating="again" type="button">Снова</button>
+                  <button class="rating hard" data-rating="hard" type="button">Трудно</button>
+                  <button class="rating good" data-rating="good" type="button">Хорошо</button>
+                  <button class="rating easy" data-rating="easy" type="button">Легко</button>
+                </div>
+              </div>
+            </article>
+
+            <div class="empty-state hidden" id="finishedState">
+              <div class="empty-art complete" aria-hidden="true">
+                <div class="paper paper-a"></div>
+                <div class="paper paper-b"></div>
+                <div class="paper paper-c"></div>
+              </div>
+              <h2>На сейчас все</h2>
+              <p>В этой колоде больше нет карточек, готовых к повторению.</p>
+              <button class="secondary-btn" id="restartBtn" type="button">
+                <i data-lucide="rotate-ccw"></i>
+                <span>Пройти заново</span>
+              </button>
+            </div>
+          </section>
+
+          <aside class="detail-panel">
+            <div class="panel-section">
+              <h2>Сессия</h2>
+              <div class="meter">
+                <div id="progressBar"></div>
+              </div>
+              <p id="sessionText">Нет активной сессии</p>
+            </div>
+            <div class="panel-section">
+              <h2>Карточка</h2>
+              <dl>
+                <div>
+                  <dt>Тип</dt>
+                  <dd id="cardType">-</dd>
+                </div>
+                <div>
+                  <dt>Колода</dt>
+                  <dd id="cardDeck">-</dd>
+                </div>
+                <div>
+                  <dt>Теги</dt>
+                  <dd id="cardTags">-</dd>
+                </div>
+              </dl>
+            </div>
+          </aside>
+        </section>
+      </main>
+    </div>
+
+    <div class="toast hidden" id="toast"></div>
+
+    <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.3/sql-wasm.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/fzstd@0.1.1/umd/index.min.js"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script src="./app.js"></script>
+  </body>
+</html>
