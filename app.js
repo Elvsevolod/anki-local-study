@@ -1,6 +1,98 @@
 const CDN_SQL_WASM = "https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.3/";
 const FIELD_SEP = "\u001f";
-const PROGRESS_KEY = "anki-local-progress-v1";
+const PROGRESS_KEY = "anki-local-progress-v2";
+const EDITS_KEY = "anki-local-edits-v1";
+const COLLECTION_DB = "anki-local-store";
+const COLLECTION_STORE = "collections";
+const COLLECTION_INDEX_KEY = "_index";
+
+function openCollectionDb() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(COLLECTION_DB, 1);
+    req.onupgradeneeded = () => {
+      req.result.createObjectStore(COLLECTION_STORE);
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function loadFilesIndex() {
+  try {
+    const db = await openCollectionDb();
+    const tx = db.transaction(COLLECTION_STORE, "readonly");
+    const req = tx.objectStore(COLLECTION_STORE).get(COLLECTION_INDEX_KEY);
+    const raw = await new Promise((resolve, reject) => {
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = reject;
+    });
+    db.close();
+    return raw || { files: [], activeId: null };
+  } catch {
+    return { files: [], activeId: null };
+  }
+}
+
+async function saveFilesIndex(index) {
+  try {
+    const db = await openCollectionDb();
+    const tx = db.transaction(COLLECTION_STORE, "readwrite");
+    tx.objectStore(COLLECTION_STORE).put(index, COLLECTION_INDEX_KEY);
+    await new Promise((resolve, reject) => {
+      tx.oncomplete = resolve;
+      tx.onerror = reject;
+    });
+    db.close();
+  } catch (err) {
+    console.warn("Не удалось сохранить индекс:", err);
+  }
+}
+
+async function storeCollectionFile(file, fileId) {
+  try {
+    const db = await openCollectionDb();
+    const tx = db.transaction(COLLECTION_STORE, "readwrite");
+    tx.objectStore(COLLECTION_STORE).put(file, fileId);
+    await new Promise((resolve, reject) => {
+      tx.oncomplete = resolve;
+      tx.onerror = reject;
+    });
+    db.close();
+  } catch (err) {
+    console.warn("Не удалось сохранить файл в IndexedDB:", err);
+  }
+}
+
+async function loadCollectionFile(fileId) {
+  try {
+    const db = await openCollectionDb();
+    const tx = db.transaction(COLLECTION_STORE, "readonly");
+    const req = tx.objectStore(COLLECTION_STORE).get(fileId);
+    const file = await new Promise((resolve, reject) => {
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = reject;
+    });
+    db.close();
+    return file || null;
+  } catch {
+    return null;
+  }
+}
+
+async function deleteCollectionFile(fileId) {
+  try {
+    const db = await openCollectionDb();
+    const tx = db.transaction(COLLECTION_STORE, "readwrite");
+    tx.objectStore(COLLECTION_STORE).delete(fileId);
+    await new Promise((resolve, reject) => {
+      tx.oncomplete = resolve;
+      tx.onerror = reject;
+    });
+    db.close();
+  } catch (err) {
+    console.warn("Не удалось удалить файл из IndexedDB:", err);
+  }
+}
 
 const els = {
   pickFileBtn: document.getElementById("pickFileBtn"),
@@ -32,19 +124,35 @@ const els = {
   cardTags: document.getElementById("cardTags"),
   toast: document.getElementById("toast"),
   dropOverlay: document.getElementById("dropOverlay"),
+  filesList: document.getElementById("filesList"),
+  filesSection: document.getElementById("filesSection"),
+  sidebar: document.getElementById("sidebar"),
+  sidebarToggle: document.getElementById("sidebarToggle"),
+  sidebarClose: document.getElementById("sidebarClose"),
+  sidebarOverlay: document.getElementById("sidebarOverlay"),
+  exportBtn: document.getElementById("exportBtn"),
+  editCardBtn: document.getElementById("editCardBtn"),
+  editModal: document.getElementById("editModal"),
+  editBackdrop: document.getElementById("editBackdrop"),
+  editCloseBtn: document.getElementById("editCloseBtn"),
+  editCancelBtn: document.getElementById("editCancelBtn"),
+  editSaveBtn: document.getElementById("editSaveBtn"),
+  editBody: document.getElementById("editBody"),
 };
 
 const initialProgress = loadProgress();
 
 const state = {
   collection: null,
+  activeFileId: null,
   activeDeckId: "all",
   queue: [],
   queueOriginalLength: 0,
   currentIndex: 0,
   answerVisible: false,
   progress: initialProgress,
-  studiedToday: initialProgress.days[todayKey()] || 0,
+  filesIndex: { files: [], activeId: null },
+  studiedToday: 0,
 };
 
 let sqlReady;
@@ -69,6 +177,7 @@ els.ratingRow.addEventListener("click", (event) => {
 els.pasteBtn.addEventListener("click", pasteFromClipboard);
 
 document.addEventListener("paste", (event) => {
+  if (!els.editModal.classList.contains("hidden")) return;
   const file = getFileFromPasteEvent(event);
   if (file) {
     event.preventDefault();
@@ -111,10 +220,430 @@ document.addEventListener("drop", (event) => {
   }
 });
 
+/* --- Sidebar toggle --- */
+
+function openSidebar() {
+  els.sidebar.classList.add("open");
+  els.sidebarOverlay.classList.remove("hidden");
+  refreshIcons();
+}
+
+function closeSidebar() {
+  els.sidebar.classList.remove("open");
+  els.sidebarOverlay.classList.add("hidden");
+}
+
+function toggleSidebar() {
+  if (els.sidebar.classList.contains("open")) {
+    closeSidebar();
+  } else {
+    openSidebar();
+  }
+}
+
+els.sidebarToggle.addEventListener("click", toggleSidebar);
+els.sidebarClose.addEventListener("click", closeSidebar);
+els.sidebarOverlay.addEventListener("click", closeSidebar);
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && els.sidebar.classList.contains("open")) {
+    closeSidebar();
+  }
+});
+
+function maybeCloseSidebar() {
+  const isMobile = window.matchMedia("(max-width: 980px)").matches;
+  if (isMobile) closeSidebar();
+}
+
+/* --- Card editing --- */
+
+function loadEdits() {
+  try {
+    return JSON.parse(localStorage.getItem(EDITS_KEY) || "{}");
+  } catch {
+    return {};
+  }
+}
+
+function saveEdits(edits) {
+  localStorage.setItem(EDITS_KEY, JSON.stringify(edits));
+}
+
+function getCardEdits(cardId) {
+  return loadEdits()[String(cardId)] || {};
+}
+
+function applyEdits(note, cardId) {
+  const edits = getCardEdits(cardId);
+  if (Object.keys(edits).length === 0) return note;
+
+  const result = { ...note };
+  result.fields = { ...note.fields };
+  Object.entries(edits).forEach(([key, value]) => {
+    // Re-apply media URL rewriting so images survive across reloads
+    let html = value;
+    if (state.collection && state.collection.mediaUrls) {
+      state.collection.mediaUrls.forEach((blobUrl, filename) => {
+        html = html.split(filename).join(blobUrl);
+      });
+    }
+    result.fields[key] = html;
+  });
+  return result;
+}
+
+let editCardId = null;
+
+function openEditModal() {
+  const card = state.queue[state.currentIndex];
+  if (!card) return;
+
+  editCardId = card.id;
+  const note = card.note;
+  const edits = getCardEdits(card.id);
+  const fieldNames = note.fieldNames || Object.keys(note.fields);
+  const fieldLabels = {
+    Front: "Вопрос",
+    Back: "Ответ",
+    Text: "Текст",
+    "Back Extra": "Доп. ответа",
+    Occlusion: "Перекрытие",
+    Image: "Изображение",
+    Header: "Заголовок",
+    Comments: "Комментарии",
+    "Add Reverse": "Доб. обратную",
+  };
+
+  els.editBody.innerHTML = fieldNames
+    .map((name) => {
+      const label = fieldLabels[name] || name;
+      const value = edits[name] !== undefined ? edits[name] : (note.fields[name] || "");
+      return `
+        <div class="edit-field">
+          <label>${escapeHtml(label)}</label>
+          <div class="editor-toolbar">
+            <button type="button" class="editor-btn" data-cmd="bold" title="Жирный"><b>B</b></button>
+            <button type="button" class="editor-btn" data-cmd="italic" title="Курсив"><i>I</i></button>
+            <button type="button" class="editor-btn" data-cmd="image" title="Вставить картинку">
+              <i data-lucide="image"></i>
+            </button>
+          </div>
+          <div class="editor-area" contenteditable="true" data-field="${escapeHtml(name)}">${value}</div>
+        </div>
+      `;
+    })
+    .join("");
+
+  // Wire toolbar buttons and paste handler
+  els.editBody.querySelectorAll(".editor-toolbar").forEach((toolbar) => {
+    const area = toolbar.nextElementSibling;
+
+    toolbar.querySelectorAll(".editor-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const cmd = btn.dataset.cmd;
+        if (cmd === "bold") {
+          document.execCommand("bold");
+          area.focus();
+        } else if (cmd === "italic") {
+          document.execCommand("italic");
+          area.focus();
+        } else if (cmd === "image") {
+          const input = document.createElement("input");
+          input.type = "file";
+          input.accept = "image/*";
+          input.onchange = () => {
+            const file = input.files?.[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = () => {
+              const img = `<img src="${reader.result}" style="max-width:100%">`;
+              document.execCommand("insertHTML", false, img);
+            };
+            reader.readAsDataURL(file);
+          };
+          input.click();
+        }
+      });
+    });
+
+    area.addEventListener("paste", (event) => {
+      const items = event.clipboardData?.items;
+      if (!items) return;
+      for (const item of items) {
+        if (item.type.startsWith("image/")) {
+          event.preventDefault();
+          const blob = item.getAsFile();
+          const reader = new FileReader();
+          reader.onload = () => {
+            const img = `<img src="${reader.result}" style="max-width:100%">`;
+            document.execCommand("insertHTML", false, img);
+          };
+          reader.readAsDataURL(blob);
+          return;
+        }
+      }
+    });
+  });
+
+  els.editModal.classList.remove("hidden");
+  refreshIcons();
+}
+
+function closeEditModal() {
+  els.editModal.classList.add("hidden");
+  editCardId = null;
+}
+
+function saveEdit() {
+  if (editCardId === null) return;
+
+  const card = state.queue[state.currentIndex];
+  if (!card) return;
+
+  const edits = loadEdits();
+  // Merge with existing edits so unchanged fields are preserved
+  const cardEdits = getCardEdits(editCardId);
+  let changed = false;
+
+  els.editBody.querySelectorAll(".editor-area").forEach((area) => {
+    const field = area.dataset.field;
+    if (!field) return;
+    let currentHTML = area.innerHTML;
+    // Convert blob URLs back to filenames for storage
+    if (state.collection && state.collection.mediaUrls) {
+      state.collection.mediaUrls.forEach((blobUrl, filename) => {
+        currentHTML = currentHTML.split(blobUrl).join(filename);
+      });
+    }
+    // Compare with original note field (or existing edit)
+    const original =
+      cardEdits[field] !== undefined
+        ? cardEdits[field]
+        : (card.note.fields[field] || "");
+    if (currentHTML !== original) {
+      cardEdits[field] = currentHTML;
+      changed = true;
+    }
+  });
+
+  if (changed) {
+    edits[String(editCardId)] = cardEdits;
+    saveEdits(edits);
+  }
+  closeEditModal();
+  if (changed) {
+    renderStudy();
+    refreshIcons();
+    showToast("Карточка сохранена");
+  }
+}
+
+els.editCardBtn.addEventListener("click", openEditModal);
+els.editCloseBtn.addEventListener("click", closeEditModal);
+els.editCancelBtn.addEventListener("click", closeEditModal);
+els.editBackdrop.addEventListener("click", closeEditModal);
+els.editSaveBtn.addEventListener("click", saveEdit);
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !els.editModal.classList.contains("hidden")) {
+    closeEditModal();
+  }
+});
+
+/* --- Export .apkg --- */
+
+async function exportApkg() {
+  if (!state.collection) {
+    showToast("Нет загруженной колоды");
+    return;
+  }
+
+  if (!window.JSZip || !window.initSqlJs) {
+    showToast("Библиотеки еще загружаются. Попробуйте снова.");
+    return;
+  }
+
+  els.exportBtn.disabled = true;
+  els.exportBtn.querySelector("span").textContent = "Выгружаю...";
+
+  try {
+    const SQL = await getSql();
+    const db = new SQL.Database();
+    const now = Math.floor(Date.now() / 1000);
+    const colId = 1;
+    const nextId = getNextId();
+
+    // Build models JSON
+    const modelsJson = JSON.stringify(state.collection.models);
+    // Build decks JSON
+    const decksJson = JSON.stringify(state.collection.decks);
+
+    // Create col table
+    db.run(`CREATE TABLE col (
+      id INTEGER PRIMARY KEY, crt INTEGER, mod INTEGER, scm INTEGER,
+      ver INTEGER, dty INTEGER, usn INTEGER, ls INTEGER, conf TEXT,
+      models TEXT, decks TEXT, dconf TEXT, tags TEXT
+    )`);
+    db.run("INSERT INTO col VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", [
+      colId, state.collection.createdAt || now, now, 0, 18, 0, -1, 0,
+      "{}", modelsJson, decksJson, "{}", "{}",
+    ]);
+
+    // Create notes table
+    db.run(`CREATE TABLE notes (
+      id INTEGER PRIMARY KEY, guid TEXT, mid INTEGER, mod INTEGER,
+      usn INTEGER, tags TEXT, flds TEXT, sfld TEXT, csum INTEGER,
+      flags INTEGER, data TEXT
+    )`);
+
+    // Create cards table
+    db.run(`CREATE TABLE cards (
+      id INTEGER PRIMARY KEY, nid INTEGER, did INTEGER, ord INTEGER,
+      mod INTEGER, usn INTEGER, type INTEGER, queue INTEGER,
+      due INTEGER, ivl INTEGER, factor INTEGER, reps INTEGER,
+      lapses INTEGER, left INTEGER, odue INTEGER, odid INTEGER,
+      flags INTEGER, data TEXT
+    )`);
+
+    // Build reverse media map: blobUrl → filename
+    const blobToName = new Map();
+    if (state.collection.mediaUrls) {
+      state.collection.mediaUrls.forEach((blobUrl, filename) => {
+        blobToName.set(blobUrl, filename);
+      });
+    }
+
+    function restoreMedia(html) {
+      let out = html;
+      blobToName.forEach((filename, blobUrl) => {
+        out = out.split(blobUrl).join(filename);
+      });
+      return out;
+    }
+
+    const notesMap = new Map();
+    let noteId = nextId;
+    let cardId = nextId;
+    const editedFields = loadEdits();
+
+    state.collection.notes.forEach((note) => {
+      const edits = editedFields[String(note.id)] || {};
+      const rawFields = (note.fieldNames || Object.keys(note.fields))
+        .map((name) => {
+          const raw = edits[name] !== undefined ? edits[name] : (note.fields[name] || "");
+          return restoreMedia(raw);
+        });
+      const flds = rawFields.join(FIELD_SEP);
+      const sfld = rawFields[0] || "";
+      const tags = note.tags || "";
+
+      db.run("INSERT INTO notes VALUES (?,?,?,?,?,?,?,?,?,?,?)", [
+        noteId, note.guid || String(noteId), Number(note.mid) || 1, now, -1,
+        tags, flds, sfld, 0, 0, "",
+      ]);
+
+      notesMap.set(String(note.id), noteId);
+      noteId += 1;
+    });
+
+    state.collection.cards.forEach((card) => {
+      const nid = notesMap.get(String(card.nid));
+      if (!nid) return;
+
+      db.run("INSERT INTO cards VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", [
+        cardId, nid, Number(card.deckId) || 1, card.ord, now, -1,
+        card.type, card.queue, card.due, card.interval || 0,
+        card.factor || 2500, card.reps, card.lapses, 0, 0, 0, 0, "",
+      ]);
+
+      cardId += 1;
+    });
+
+    const dbUint8 = db.export();
+    db.close();
+
+    // Compress with Zstandard if available, otherwise store uncompressed
+    let collectionBytes = dbUint8;
+    if (window.fzstd?.compress) {
+      collectionBytes = window.fzstd.compress(dbUint8);
+    }
+
+    const zip = new JSZip();
+    zip.file("collection.anki21b", collectionBytes);
+
+    // Media map and files
+    const mediaMap = [];
+    const mediaUrls = state.collection.mediaUrls;
+    if (mediaUrls && mediaUrls.size > 0) {
+      const entries = Array.from(mediaUrls.entries());
+      for (let i = 0; i < entries.length; i += 1) {
+        const [fileName, blobUrl] = entries[i];
+        mediaMap.push([String(i), fileName]);
+
+        try {
+          const response = await fetch(blobUrl);
+          const blob = await response.blob();
+          zip.file(String(i), blob);
+        } catch {
+          // Skip unreachable media
+        }
+      }
+    }
+
+    zip.file("media", JSON.stringify(Object.fromEntries(mediaMap)));
+
+    const zipBlob = await zip.generateAsync({ type: "blob" });
+    const url = URL.createObjectURL(zipBlob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${state.collection.name}.apkg`;
+    document.body.append(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+
+    showToast(".apkg выгружен");
+  } catch (error) {
+    console.error(error);
+    showToast("Не удалось выгрузить .apkg");
+  } finally {
+    els.exportBtn.disabled = false;
+    els.exportBtn.querySelector("span").textContent = "Выгрузить .apkg";
+  }
+}
+
+function getNextId() {
+  return Math.floor(Date.now() / 1000) * 1000;
+}
+
+els.exportBtn.addEventListener("click", exportApkg);
+
 fixIosFileAccept();
 
-render();
-refreshIcons();
+(async function init() {
+  const index = await loadFilesIndex();
+  state.filesIndex = index;
+
+  const activeId = index.activeId;
+  if (activeId) {
+    const file = await loadCollectionFile(activeId);
+    if (file) {
+      try {
+        await importFile(file, { silent: true, skipStore: true, fileId: activeId });
+      } catch (err) {
+        console.warn("Не удалось восстановить коллекцию:", err);
+      }
+    } else {
+      index.activeId = null;
+      index.files = index.files.filter((f) => f.id !== activeId);
+      saveFilesIndex(index);
+      state.filesIndex = index;
+    }
+  }
+  render();
+  refreshIcons();
+})();
 
 async function handleFileSelect(event) {
   const file = event.target.files?.[0];
@@ -123,24 +652,48 @@ async function handleFileSelect(event) {
   els.fileInput.value = "";
 }
 
-async function importFile(file) {
-  setLoading(true, "Импортирую...");
+async function importFile(file, { silent = false, skipStore = false, fileId = null } = {}) {
+  if (!silent) setLoading(true, "Импортирую...");
   try {
     const nextCollection = await importApkg(file);
     revokeMediaUrls(state.collection);
     state.collection = nextCollection;
     state.activeDeckId = "all";
+
+    const id = fileId || `file_${Date.now()}`;
+    state.activeFileId = id;
+
+    if (!skipStore) {
+      await storeCollectionFile(file, id);
+
+      const name = file.name.replace(/\.apkg$/i, "") || "Колода";
+      const index = state.filesIndex;
+      const existing = index.files.find((f) => f.id === id);
+      if (existing) {
+        existing.name = name;
+        existing.cardCount = nextCollection.cards.length;
+        existing.openedAt = Date.now();
+      } else {
+        index.files.push({ id, name, cardCount: nextCollection.cards.length, openedAt: Date.now() });
+      }
+      index.activeId = id;
+      saveFilesIndex(index);
+    }
+
     state.studiedToday = getTodayCount();
     buildQueue();
-    showToast(
-      `Загружено: ${pluralRu(state.collection.cards.length, ["карточка", "карточки", "карточек"])}`,
-    );
+    if (!silent) {
+      showToast(
+        `Загружено: ${pluralRu(state.collection.cards.length, ["карточка", "карточки", "карточек"])}`,
+      );
+    }
+    maybeCloseSidebar();
     render();
   } catch (error) {
     console.error(error);
-    showToast(error.message || "Не удалось прочитать пакет Anki");
+    if (!silent) showToast(error.message || "Не удалось прочитать пакет Anki");
   } finally {
-    setLoading(false);
+    if (!silent) setLoading(false);
   }
 }
 
@@ -172,8 +725,24 @@ async function importApkg(file) {
     throw new Error("Коллекция Anki пустая или повреждена.");
   }
 
-  const decks = parseJsonMap(col.decks);
-  const models = parseJsonMap(col.models);
+  let decks = parseJsonMap(col.decks);
+  let models = parseJsonMap(col.models);
+
+  // Fallback: если anki21b не содержит models/decks, читаем из collection.anki2
+  if ((Object.keys(decks).length === 0 || Object.keys(models).length === 0) && zip.file("collection.anki2")) {
+    try {
+      const legacyEntry = zip.file("collection.anki2");
+      const legacyBytes = await readApkgBytes(legacyEntry);
+      const legacyDb = new SQL.Database(legacyBytes);
+      const legacyCol = firstRow(legacyDb, "select decks, models from col limit 1");
+      if (legacyCol) {
+        if (Object.keys(models).length === 0) models = parseJsonMap(legacyCol.models);
+        if (Object.keys(decks).length === 0) decks = parseJsonMap(legacyCol.decks);
+      }
+      legacyDb.close();
+    } catch { /* legacy unavailable */ }
+  }
+
   const mediaUrls = await buildMediaUrls(zip);
   const notes = readNotes(db, models, mediaUrls);
   const cards = readCards(db, notes, decks, models);
@@ -458,8 +1027,124 @@ function buildQueue(options = {}) {
   state.answerVisible = false;
 }
 
+async function switchToFile(fileId) {
+  if (fileId === state.activeFileId && state.collection) return;
+  saveProgress();
+
+  revokeMediaUrls(state.collection);
+  state.collection = null;
+  state.queue = [];
+  state.queueOriginalLength = 0;
+  state.currentIndex = 0;
+  state.answerVisible = false;
+  state.activeFileId = null;
+
+  const file = await loadCollectionFile(fileId);
+  if (!file) {
+    removeFileFromIndex(fileId);
+    render();
+    return;
+  }
+
+  try {
+    state.filesIndex.activeId = fileId;
+    saveFilesIndex(state.filesIndex);
+    await importFile(file, { silent: true, skipStore: true, fileId });
+  } catch (err) {
+    console.warn("Не удалось переключиться на файл:", err);
+    removeFileFromIndex(fileId);
+  }
+}
+
+async function removeFileFromUI(fileId, event) {
+  event.stopPropagation();
+  const confirmed = window.confirm(
+    "Удалить файл и его прогресс из списка?"
+  );
+  if (!confirmed) return;
+
+  removeFileFromIndex(fileId);
+}
+
+async function removeFileFromIndex(fileId) {
+  await deleteCollectionFile(fileId);
+  const index = state.filesIndex;
+  index.files = index.files.filter((f) => f.id !== fileId);
+
+  if (index.activeId === fileId) {
+    revokeMediaUrls(state.collection);
+    state.collection = null;
+    state.activeFileId = null;
+    state.queue = [];
+    state.queueOriginalLength = 0;
+    state.currentIndex = 0;
+    state.answerVisible = false;
+
+    // Remove progress for this file
+    const progress = state.progress;
+    delete progress.byFile[fileId];
+    saveProgress();
+
+    // Switch to another file if available
+    const next = index.files[index.files.length - 1];
+    if (next) {
+      index.activeId = next.id;
+      saveFilesIndex(index);
+      state.filesIndex = index;
+      const file = await loadCollectionFile(next.id);
+      if (file) {
+        try {
+          await importFile(file, { silent: true, skipStore: true, fileId: next.id });
+        } catch (err) {
+          console.warn("Не удалось переключиться:", err);
+        }
+      }
+      return;
+    }
+    index.activeId = null;
+  }
+
+  saveFilesIndex(index);
+  state.studiedToday = getTodayCount();
+  render();
+}
+
+function renderFilesList() {
+  els.filesList.innerHTML = "";
+  const files = state.filesIndex.files || [];
+
+  if (files.length === 0) {
+    els.filesSection.classList.add("hidden");
+    return;
+  }
+
+  els.filesSection.classList.remove("hidden");
+
+  files
+    .sort((a, b) => b.openedAt - a.openedAt)
+    .forEach((file) => {
+      const item = document.createElement("div");
+      item.className = `file-item ${file.id === state.activeFileId ? "active" : ""}`;
+      item.innerHTML = `
+        <span class="file-item-name">${escapeHtml(file.name)}</span>
+        <span class="file-item-count">${file.cardCount || 0}</span>
+        <button class="file-item-remove" type="button" title="Удалить">
+          <i data-lucide="x"></i>
+        </button>
+      `;
+
+      item.addEventListener("click", () => switchToFile(file.id));
+      item
+        .querySelector(".file-item-remove")
+        .addEventListener("click", (e) => removeFileFromUI(file.id, e));
+
+      els.filesList.append(item);
+    });
+}
+
 function render() {
   renderCollection();
+  renderFilesList();
   renderDecks();
   renderStats();
   renderStudy();
@@ -467,23 +1152,23 @@ function render() {
 }
 
 function resetAll() {
+  const fileId = state.activeFileId;
+  if (!fileId || !state.collection) {
+    showToast("Нет загруженной колоды");
+    return;
+  }
+
   const confirmed = window.confirm(
-    "Сбросить прогресс, выгрузить текущую колоду и начать заново?",
+    "Сбросить прогресс текущей колоды и начать заново?",
   );
   if (!confirmed) return;
 
-  revokeMediaUrls(state.collection);
-  localStorage.removeItem(PROGRESS_KEY);
-  state.collection = null;
-  state.activeDeckId = "all";
-  state.queue = [];
-  state.queueOriginalLength = 0;
-  state.currentIndex = 0;
-  state.answerVisible = false;
-  state.progress = { cards: {}, days: {} };
+  // Reset progress for this file only
+  state.progress.byFile[fileId] = { cards: {}, days: {} };
+  saveProgress();
   state.studiedToday = 0;
-  els.fileInput.value = "";
-  showToast("Кеш и прогресс сброшены");
+  buildQueue({ includeAll: true });
+  showToast("Прогресс сброшен");
   render();
 }
 
@@ -543,6 +1228,7 @@ function renderDecks() {
     button.addEventListener("click", () => {
       state.activeDeckId = deck.id;
       buildQueue();
+      maybeCloseSidebar();
       render();
     });
     els.deckList.append(button);
@@ -622,18 +1308,19 @@ function renderCardSide(card, side, frontSide = "") {
 
 function renderTemplate(template, card, side, frontSide) {
   const note = card.note;
+  const fields = applyEdits(note, card.id).fields;
   let html = String(template || "");
 
   html = html.replace(/\{\{FrontSide\}\}/g, frontSide || "");
-  html = applyConditionals(html, note.fields);
+  html = applyConditionals(html, fields);
 
   html = html.replace(/\{\{cloze(?::[^}:]+)*:([^}]+)\}\}/g, (_match, fieldName) => {
-    const raw = note.fields[fieldName.trim()] || "";
+    const raw = fields[fieldName.trim()] || "";
     return renderCloze(raw, card.ord, side);
   });
 
   html = html.replace(/\{\{type:([^}]+)\}\}/g, (_match, fieldName) => {
-    return note.fields[fieldName.trim()] || "";
+    return fields[fieldName.trim()] || "";
   });
 
   html = html.replace(/\{\{([^{}]+)\}\}/g, (_match, rawToken) => {
@@ -644,7 +1331,7 @@ function renderTemplate(template, card, side, frontSide) {
     if (token === "Card") return escapeHtml(card.templateName);
 
     const fieldName = token.includes(":") ? token.split(":").pop().trim() : token;
-    return note.fields[fieldName] || "";
+    return fields[fieldName] || "";
   });
 
   return html
@@ -699,7 +1386,8 @@ function rateCurrent(rating) {
   const baseInterval = previous?.intervalDays || Math.max(0, card.interval);
   const next = scheduleForRating(rating, baseInterval, previous);
 
-  state.progress.cards[String(card.id)] = {
+  const fp = getFileProgress();
+  fp.cards[String(card.id)] = {
     dueAt: next.dueAt,
     intervalDays: next.intervalDays,
     reps: (previous?.reps || card.reps || 0) + 1,
@@ -767,19 +1455,26 @@ function getActiveDeckName() {
   return cleanDeckName(state.collection.decks[state.activeDeckId]?.name || "Колода");
 }
 
+function getFileProgress() {
+  if (!state.activeFileId) return { cards: {}, days: {} };
+  if (!state.progress.byFile[state.activeFileId]) {
+    state.progress.byFile[state.activeFileId] = { cards: {}, days: {} };
+  }
+  return state.progress.byFile[state.activeFileId];
+}
+
 function getCardProgress(cardId) {
-  return state.progress.cards[String(cardId)];
+  return getFileProgress().cards[String(cardId)];
 }
 
 function loadProgress() {
   try {
     const parsed = JSON.parse(localStorage.getItem(PROGRESS_KEY) || "{}");
     return {
-      cards: parsed.cards || {},
-      days: parsed.days || {},
+      byFile: parsed.byFile || {},
     };
   } catch {
-    return { cards: {}, days: {} };
+    return { byFile: {} };
   }
 }
 
@@ -792,13 +1487,14 @@ function todayKey() {
 }
 
 function getTodayCount() {
-  return state.progress.days[todayKey()] || 0;
+  return getFileProgress().days[todayKey()] || 0;
 }
 
 function bumpTodayCount() {
   const key = todayKey();
-  state.progress.days[key] = (state.progress.days[key] || 0) + 1;
-  state.studiedToday = state.progress.days[key];
+  const fp = getFileProgress();
+  fp.days[key] = (fp.days[key] || 0) + 1;
+  state.studiedToday = fp.days[key];
 }
 
 function clearCardDetails() {

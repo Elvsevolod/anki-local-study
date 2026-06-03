@@ -6,9 +6,7 @@ Local Anki-style web app for importing `.apkg` decks and studying cards in the b
 
 Open the GitHub Pages version:
 
-```text
 https://elvsevolod.github.io/anki-local-study/
-```
 
 ## Run Locally
 
